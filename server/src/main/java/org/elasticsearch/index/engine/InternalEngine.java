@@ -23,7 +23,9 @@ import org.apache.logging.log4j.Logger;
 import org.apache.lucene.document.Field;
 import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.index.DirectoryReader;
+import org.apache.lucene.index.DocValuesType;
 import org.apache.lucene.index.IndexCommit;
+import org.apache.lucene.index.IndexOptions;
 import org.apache.lucene.index.IndexReader;
 import org.apache.lucene.index.IndexWriter;
 import org.apache.lucene.index.IndexWriterConfig;
@@ -68,6 +70,7 @@ import org.elasticsearch.index.VersionType;
 import org.elasticsearch.index.mapper.IdFieldMapper;
 import org.elasticsearch.index.mapper.MapperService;
 import org.elasticsearch.index.mapper.ParseContext;
+import org.elasticsearch.index.mapper.ParseContext.Document;
 import org.elasticsearch.index.mapper.ParsedDocument;
 import org.elasticsearch.index.mapper.SeqNoFieldMapper;
 import org.elasticsearch.index.mapper.SourceFieldMapper;
@@ -87,9 +90,11 @@ import org.elasticsearch.threadpool.ThreadPool;
 
 import java.io.Closeable;
 import java.io.IOException;
+import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.Collection;
 import java.util.HashMap;
+import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -1204,7 +1209,50 @@ public class InternalEngine extends Engine {
         return true;
     }
 
+    final static Set standartNames = Set.of("_id", "_seq_no", "_primary_term",
+            "_recovery_source", "_version");
     private void updateDocs(final Term uid, final List<ParseContext.Document> docs, final IndexWriter indexWriter) throws IOException {
+        List<Document> inPlaceDocs = new ArrayList<>();
+        for (Iterator<ParseContext.Document> docIter = docs.iterator(); docIter.hasNext();) {
+            Document document = (Document) docIter.next();
+            boolean inPlace = true;
+            final List<IndexableField> fields = document.getFields();
+            for (Iterator fieldIter = fields.iterator(); fieldIter.hasNext();) {
+                IndexableField indexableField = (IndexableField) fieldIter.next();
+                if (!standartNames.contains(indexableField.name())) {
+                    if (DocValuesType.NUMERIC!=indexableField.fieldType().docValuesType() || 
+                            indexableField.fieldType().stored() || 
+                            IndexOptions.NONE != indexableField.fieldType().indexOptions()) {
+                        inPlace = false;
+                        break;
+                    }
+                }
+            }
+            if (inPlace) {
+                docIter.remove();
+                inPlaceDocs.add(document);
+            }
+        }
+        for (Document inPlaceUpd : inPlaceDocs) {
+          if (softDeleteEnabled) {
+              throw new IllegalStateException("inPlace update of "+inPlaceDocs+
+                      " isn't supported when soft deletes are "+softDeleteEnabled);
+          }    
+          for (Iterator<IndexableField> fieldIter = inPlaceUpd.iterator(); fieldIter.hasNext();) {
+              IndexableField indexableField = (IndexableField) fieldIter.next();
+              if (!standartNames.contains(indexableField.name())) {
+                  if (DocValuesType.NUMERIC!=indexableField.fieldType().docValuesType() || 
+                          indexableField.fieldType().stored() || 
+                          IndexOptions.NONE != indexableField.fieldType().indexOptions()) {
+                      throw new IllegalStateException("unsupported field "+ indexableField+
+                              " for inPlace update");
+                  }
+                  NumericDocValuesField field = (NumericDocValuesField)indexableField;
+                  indexWriter.updateNumericDocValue(uid, field.name(), field.numericValue().longValue());
+              }
+          }
+        }
+        if (!docs.isEmpty()) {
         if (softDeleteEnabled) {
             if (docs.size() > 1) {
                 indexWriter.softUpdateDocuments(uid, docs, softDeletesField);
@@ -1218,7 +1266,8 @@ public class InternalEngine extends Engine {
                 indexWriter.updateDocument(uid, docs.get(0));
             }
         }
-        numDocUpdates.inc(docs.size());
+        }
+        numDocUpdates.inc(docs.size() + inPlaceDocs.size());
     }
 
     @Override

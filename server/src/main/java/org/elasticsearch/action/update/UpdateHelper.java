@@ -32,6 +32,7 @@ import org.elasticsearch.common.collect.Tuple;
 import org.elasticsearch.common.io.stream.BytesStreamOutput;
 import org.elasticsearch.common.io.stream.Streamable;
 import org.elasticsearch.common.xcontent.XContentBuilder;
+import org.elasticsearch.common.xcontent.XContentFactory;
 import org.elasticsearch.common.xcontent.XContentHelper;
 import org.elasticsearch.common.xcontent.XContentType;
 import org.elasticsearch.index.VersionType;
@@ -78,14 +79,22 @@ public class UpdateHelper {
      * Prepares an update request by converting it into an index or delete request or an update response (no action, in the event of a
      * noop).
      */
-    protected Result prepare(ShardId shardId, UpdateRequest request, final GetResult getResult, LongSupplier nowInMillis) {
+    protected Result prepare(ShardId shardId, UpdateRequest request, GetResult getResult, LongSupplier nowInMillis) {
         if (getResult.isExists() == false) {
             // If the document didn't exist, execute the update request as an upsert
             return prepareUpsert(shardId, request, getResult, nowInMillis);
-        } else if (getResult.internalSourceRef() == null) {
+        } else  if (getResult.internalSourceRef() == null) { // so, what, don't care. 
             // no source, we can't do anything, throw a failure...
-            throw new DocumentSourceMissingException(shardId, request.type(), request.id());
-        } else if (request.script() == null && request.doc() != null) {
+            //throw new DocumentSourceMissingException(shardId, request.type(), request.id());
+            BytesReference emptySrc;
+            try {
+                emptySrc = BytesReference.bytes(XContentFactory.contentBuilder(XContentType.JSON).map(Collections.emptyMap()));
+            } catch (IOException e) {
+                throw new RuntimeException("attempting to bake an empty map", e);
+            }
+            getResult = new GetResult(getResult.getIndex(), getResult.getType(), getResult.getId(), getResult.getSeqNo(), 
+                    getResult.getPrimaryTerm(), getResult.getVersion(), getResult.isExists(), emptySrc, getResult.getFields());
+        } /*else*/ if (request.script() == null && request.doc() != null) {
             // The request has no script, it is a new doc that should be merged with the old document
             return prepareUpdateIndexRequest(shardId, request, getResult, request.detectNoop());
         } else {

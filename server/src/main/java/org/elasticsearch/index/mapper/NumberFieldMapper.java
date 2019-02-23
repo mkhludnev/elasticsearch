@@ -25,6 +25,7 @@ import org.apache.lucene.document.FloatPoint;
 import org.apache.lucene.document.HalfFloatPoint;
 import org.apache.lucene.document.IntPoint;
 import org.apache.lucene.document.LongPoint;
+import org.apache.lucene.document.NumericDocValuesField;
 import org.apache.lucene.document.SortedNumericDocValuesField;
 import org.apache.lucene.document.StoredField;
 import org.apache.lucene.index.IndexOptions;
@@ -627,7 +628,7 @@ public class NumberFieldMapper extends FieldMapper {
             @Override
             public Query rangeQuery(String field, Object lowerTerm, Object upperTerm,
                              boolean includeLower, boolean includeUpper,
-                             boolean hasDocValues) {
+                             boolean hasDocValues, boolean hasIndex) {
                 int l = Integer.MIN_VALUE;
                 int u = Integer.MAX_VALUE;
                 if (lowerTerm != null) {
@@ -659,8 +660,13 @@ public class NumberFieldMapper extends FieldMapper {
                 }
                 Query query = IntPoint.newRangeQuery(field, l, u);
                 if (hasDocValues) {
-                    Query dvQuery = SortedNumericDocValuesField.newSlowRangeQuery(field, l, u);
-                    query = new IndexOrDocValuesQuery(query, dvQuery);
+                    Query dvQuery = field.startsWith("dv_") ? NumericDocValuesField.newSlowRangeQuery(field, l, u) : 
+                        SortedNumericDocValuesField.newSlowRangeQuery(field, l, u);
+                    if(hasIndex) {
+                         query = new IndexOrDocValuesQuery(query, dvQuery);
+                    } else {
+                        query = dvQuery;
+                    }
                 }
                 return query;
             }
@@ -673,12 +679,20 @@ public class NumberFieldMapper extends FieldMapper {
                     fields.add(new IntPoint(name, value.intValue()));
                 }
                 if (docValued) {
-                    fields.add(new SortedNumericDocValuesField(name, value.intValue()));
+                    fields.add(name.startsWith("dv_") ? new NumericDocValuesField(name, value.intValue()):
+                            new SortedNumericDocValuesField(name, value.intValue()));
                 }
                 if (stored) {
                     fields.add(new StoredField(name, value.intValue()));
                 }
                 return fields;
+            }
+
+            @Override
+            public Query rangeQuery(String field, Object lowerTerm, Object upperTerm, boolean includeLower, boolean includeUpper,
+                    boolean hasDocValues) {
+                return rangeQuery( field, lowerTerm, upperTerm, includeLower, includeUpper,
+                        hasDocValues, true) ;
             }
         },
         LONG("long", NumericType.LONG) {
@@ -822,6 +836,13 @@ public class NumberFieldMapper extends FieldMapper {
         public abstract Query rangeQuery(String field, Object lowerTerm, Object upperTerm,
                                   boolean includeLower, boolean includeUpper,
                                   boolean hasDocValues);
+        public Query rangeQuery(String field, Object lowerTerm, Object upperTerm,
+                boolean includeLower, boolean includeUpper,
+                boolean hasDocValues, boolean hasIndex) {
+            return rangeQuery( field, lowerTerm, upperTerm,
+                    includeLower, includeUpper,
+                    hasDocValues);
+        }
         public abstract Number parse(XContentParser parser, boolean coerce) throws IOException;
         public abstract Number parse(Object value, boolean coerce);
         public abstract Number parsePoint(byte[] value);
@@ -938,8 +959,9 @@ public class NumberFieldMapper extends FieldMapper {
 
         @Override
         public Query rangeQuery(Object lowerTerm, Object upperTerm, boolean includeLower, boolean includeUpper, QueryShardContext context) {
-            failIfNotIndexed();
-            Query query = type.rangeQuery(name(), lowerTerm, upperTerm, includeLower, includeUpper, hasDocValues());
+ //           failIfNotIndexed();
+            Query query = type.rangeQuery(name(), lowerTerm, upperTerm, includeLower, includeUpper, hasDocValues(),
+                    indexOptions() != IndexOptions.NONE || pointIndexDimensionCount() != 0);
             if (boost() != 1f) {
                 query = new BoostQuery(query, boost());
             }
